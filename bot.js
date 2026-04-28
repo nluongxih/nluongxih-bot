@@ -1,7 +1,7 @@
 require('dotenv').config();
 const { Client } = require('discord.js-selfbot-v13');
 const { MessageAttachment } = require('discord.js');
-const { joinVoiceChannel, getVoiceConnection, createAudioPlayer, createAudioResource, StreamType, AudioPlayerStatus, VoiceConnectionStatus, entersState } = require('@discordjs/voice');
+const { joinVoiceChannel, getVoiceConnection, createAudioPlayer, createAudioResource, StreamType, AudioPlayerStatus } = require('@discordjs/voice');
 const play = require('play-dl');
 const ytdl = require('@distube/ytdl-core');
 const ffmpeg = require('ffmpeg-static');
@@ -12,15 +12,6 @@ const players = new Map();
 
 const client = new Client({
     checkUpdate: false,
-    patchVoice: true,
-});
-
-process.on('unhandledRejection', (error) => {
-    console.error('Unhandled promise rejection:', error);
-});
-
-process.on('uncaughtException', (error) => {
-    console.error('Uncaught Exception:', error);
 });
 
 // THÔNG TIN NGÂN HÀNG
@@ -31,55 +22,6 @@ const selectedBank = {
 };
 
 const PREFIX = '.';
-
-function setupConnection(connection) {
-    if (connection.__setupDone) return;
-    connection.__setupDone = true;
-
-    let reconnectAttempts = 0;
-    let reconnectResetTimer = null;
-
-    connection.on('stateChange', (oldState, newState) => {
-        const oldNetworking = Reflect.get(oldState, 'networking');
-        const newNetworking = Reflect.get(newState, 'networking');
-
-        const networkStateChangeHandler = (oldNetworkState, newNetworkState) => {
-            const newUdp = Reflect.get(newNetworkState, 'udp');
-            clearInterval(newUdp?.keepAliveInterval);
-        };
-
-        if (oldNetworking !== newNetworking) {
-            if (oldNetworking) oldNetworking.off('stateChange', networkStateChangeHandler);
-            if (newNetworking) newNetworking.on('stateChange', networkStateChangeHandler);
-        }
-    });
-
-    connection.on(VoiceConnectionStatus.Disconnected, async (oldState, newState) => {
-        try {
-            await Promise.race([
-                entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
-                entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
-            ]);
-        } catch (error) {
-            if (connection.state.status === VoiceConnectionStatus.Destroyed) return;
-
-            if (reconnectAttempts >= 3) {
-                console.log(`[VOICE] Bot bị văng quá nhiều lần liên tiếp (Lý do: ${newState.reason}). Dừng rejoin để tránh kẹt loop!`);
-                try { connection.destroy(); } catch(e) {}
-                return;
-            }
-
-            reconnectAttempts++;
-            console.log(`[VOICE] Mất kết nối, đang thử rejoin (lần ${reconnectAttempts}/3)...`);
-            connection.rejoin();
-
-            if (reconnectResetTimer) clearTimeout(reconnectResetTimer);
-            reconnectResetTimer = setTimeout(() => {
-                reconnectAttempts = 0;
-            }, 10000); // Sau 10 giây nếu kết nối ổn định sẽ reset số lần thử
-        }
-    });
-}
 
 client.on('ready', () => {
     console.log(`Self-bot đã sẵn sàng trên tài khoản: ${client.user.tag}`);
@@ -138,18 +80,13 @@ client.on('messageCreate', async (message) => {
             if (!channel) return await message.channel.send('Đéo thấy chanel sao vô mẹ');
 
             if (channel.type === 'GUILD_VOICE' || channel.type === 'GUILD_STAGE_VOICE') {
-                const connection = joinVoiceChannel({
+                joinVoiceChannel({
                     channelId: channel.id,
                     guildId: channel.guild.id,
                     adapterCreator: channel.guild.voiceAdapterCreator,
-                    group: client.user.id,
                     selfDeaf: false,
                     selfMute: false
                 });
-                setupConnection(connection);
-                if (connection.listenerCount('error') === 0) {
-                    connection.on('error', (err) => console.error('Voice Connection Error:', err));
-                }
                 await message.channel.send(`tao vào được chanel ${channel.name} rồi hihi`);
             } else {
                 await message.channel.send('Này không phải chanel alo troll à');
@@ -163,7 +100,7 @@ client.on('messageCreate', async (message) => {
 
     // Lệnh .leave 
     if (fullCommand === 'leave') {
-        const connection = getVoiceConnection(message.guild?.id, client.user.id) || getVoiceConnection(message.guild?.id);
+        const connection = getVoiceConnection(message.guild?.id);
         if (connection) {
             connection.destroy();
             await message.channel.send('Thôi tao rời chanel đây');
@@ -173,114 +110,22 @@ client.on('messageCreate', async (message) => {
         return;
     }
 
-    // Lệnh .outall (out sạch chanel)
-    if (fullCommand === 'outall') {
+    // Lệnh .out (out sạch chanel)
+    if (fullCommand === 'out') {
         let count = 0;
         client.guilds.cache.forEach(guild => {
-            const connection = getVoiceConnection(guild.id, client.user.id) || getVoiceConnection(guild.id);
+            const connection = getVoiceConnection(guild.id);
             if (connection) {
                 connection.destroy();
                 count++;
             }
-            if (players.has(guild.id)) {
-                players.get(guild.id).stop();
-                players.delete(guild.id);
-            }
+            if (players.has(guild.id)) players.delete(guild.id);
         });
 
         if (count > 0) {
             await message.channel.send(`Đã sút cổ con bot ra khỏi ${count} kênh voice rồi nha ní!`);
         } else {
             await message.channel.send('Có ở trong cái voice lìn nào đâu mà bảo tao out hả!');
-        }
-        return;
-    }
-
-    // Lệnh .out <id channel>
-    if (fullCommand.startsWith('out') && !fullCommand.startsWith('outall')) {
-        const args = fullCommand.split(' ');
-        let channelId = args[1];
-
-        // Nếu không có ID, lấy channel hiện tại của bạn
-        if (!channelId && message.member?.voice?.channel) {
-            channelId = message.member.voice.channel.id;
-        }
-
-        if (!channelId) {
-            return await message.channel.send('Nhập cho đủ thông tin tao mới out được má!');
-        }
-
-        try {
-            const channel = client.channels.cache.get(channelId) || await client.channels.fetch(channelId).catch(() => null);
-            if (!channel) return await message.channel.send('Đéo thấy chanel sao out');
-
-            const guildId = channel.guild?.id;
-            if (!guildId) return await message.channel.send('Chanel này không nằm trong server!');
-
-            const connection = getVoiceConnection(guildId, client.user.id) || getVoiceConnection(guildId);
-            if (connection) {
-                connection.destroy();
-                if (players.has(guildId)) {
-                    players.get(guildId).stop();
-                    players.delete(guildId);
-                }
-                await message.channel.send(`Đã rời chanel ${channel.name} thành công!`);
-            } else {
-                await message.channel.send('Có đang ở trong chanel đó đéo đâu mà bảo tao out!');
-            }
-        } catch (err) {
-            console.error(err);
-            await message.channel.send(`Lỗi rồi ní ơi ${err.message}`);
-        }
-        return;
-    }
-
-    // Lệnh .tatmic
-    if (fullCommand === 'tatmic') {
-        let count = 0;
-        client.guilds.cache.forEach(guild => {
-            const connection = getVoiceConnection(guild.id, client.user.id) || getVoiceConnection(guild.id);
-            if (connection) {
-                joinVoiceChannel({
-                    channelId: connection.joinConfig.channelId,
-                    guildId: guild.id,
-                    adapterCreator: guild.voiceAdapterCreator,
-                    group: client.user.id,
-                    selfDeaf: false,
-                    selfMute: true
-                });
-                count++;
-            }
-        });
-        if (count > 0) {
-            await message.channel.send(`Đã tự động tắt mic ở ${count} kênh voice!`);
-        } else {
-            await message.channel.send('Có ở kênh voice nào đâu mà tắt mic!');
-        }
-        return;
-    }
-
-    // Lệnh .tatloa
-    if (fullCommand === 'tatloa') {
-        let count = 0;
-        client.guilds.cache.forEach(guild => {
-            const connection = getVoiceConnection(guild.id, client.user.id) || getVoiceConnection(guild.id);
-            if (connection) {
-                joinVoiceChannel({
-                    channelId: connection.joinConfig.channelId,
-                    guildId: guild.id,
-                    adapterCreator: guild.voiceAdapterCreator,
-                    group: client.user.id,
-                    selfDeaf: true,
-                    selfMute: true
-                });
-                count++;
-            }
-        });
-        if (count > 0) {
-            await message.channel.send(`Đã tự động tắt cả loa và mic ở ${count} kênh voice!`);
-        } else {
-            await message.channel.send('Có ở kênh voice nào đâu mà tắt loa!');
         }
         return;
     }
@@ -316,15 +161,9 @@ client.on('messageCreate', async (message) => {
                 channelId: channel.id,
                 guildId: channel.guild.id,
                 adapterCreator: channel.guild.voiceAdapterCreator,
-                group: client.user.id,
                 selfDeaf: false,
                 selfMute: false
             });
-            setupConnection(connection);
-            
-            if (connection.listenerCount('error') === 0) {
-                connection.on('error', (err) => console.error('Voice Connection Error:', err));
-            }
 
             await message.channel.send(`Đang lấy nhạc từ link cho ní, đợi tí...`);
 
